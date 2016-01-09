@@ -21,8 +21,8 @@ function processProfile(imgTitle, baseX, baseY, nAngles, lineLength, Rcolumn){
 //imgTitle is the handle for an open single color image
 //Rcolumn controls the column the vector is stored in for ultimate export to csv
 	
-	//establish vectors to track profiles
-	len=lineLength*nAngles;
+    //establish vectors to track profiles
+    len=lineLength*nAngles;
     trackProfile=newArray(len);
 
     //define the endpoints for drawing the profile lines, centered at (0,0)
