@@ -1,0 +1,230 @@
+This is an example of importing radial profile data into R and formatting it for further analysis.
+
+This sample dataset was generated from images were preprocessed in ImageJ to remove intersecting matrix signal, and the cell body signal. As a result, we can segment out the "matrix" data by looking for all of the signal between the zeroes. Some profiles won't have any usable signal, and some will be really short (for example if a second cell was nearby or the cell was by the edge of the image)
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(data.table)
+
+#set your working directory to location of output from ImageJ macro
+setwd("/Volumes/CM-4/E002-CHTimecourse/segmentedTifs/")
+```
+
+1) Import all of profile arrays (searching for csvs containg phrase 'processed', to differentiate from unaltered image profiles used elsewhere).
+
+This example dataset has 3 channels in the images:
+Ch1 = DAPI, CH2 = HPG, CH3 = membrane stain
+
+The macro measured 20 radial profiles per cell, and each profile was 1000 pixels long (the macro defaults).
+So: nAngles = 20, profile Length = 1000 px by default
+
+I typically encode a lot of metadata in the file names. My standard naming convention is: ExperimentID_StainID_cellTypeDonorTimepoint_ImageNumber_Notes.fileExtension
+e.g. ...path.../E002_S005_CHADay2_03_processed.csv
+
+ExperimentID: identifier to group samples together for comparison
+StainID: unique identifier representing one sample
+cellType, Donor, Timepoint: experimental conditions
+ImageNumber: imageIdentifier within a single StainID
+
+Typically, I want to average over ImageNumber and StainID, and group by the experimental conditions.
+
+```{r}
+#find all of the csv's including the word processed, and import
+grepv <- function(pattern, x){grep(pattern, x, value =T)}
+
+files <- list.files(pattern="processed*.csv", recursive=T, full.names=T) 
+filecodes <- str_split( files, pattern = '/|\\.')
+
+alldata <- list()
+allmetadata <- data.frame()
+for(i in seq(along = files) ) {
+  x <- read.table( files[i] ,header=TRUE,sep=",")
+  splitPath <- filecodes[[i]]
+  metadata <- unlist( str_split( splitPath[length(splitPath)-1] ,  pattern = "_" ) )
+  
+  #encode the metadata from the filename into a data frame
+  allmetadata[i, "sampleID"] <-  paste(metadata[2], metadata[4], sep="-")
+  allmetadata[i,"experimentID"] <- metadata[1]
+  allmetadata[i,"stainID"] <- metadata[2]
+  allmetadata[i, "cellNumber"] <- metadata[4]
+  
+  cell_donor_day <- unlist(str_split(metadata[3], pattern = "Day") )
+  splitLocation <- nchar(cell_donor_day[1]) -1
+  allmetadata[i, "cellType"]<- substring(cell_donor_day[1], 1, splitLocation )
+  allmetadata[i, "donor"] <- substring(cell_donor_day[1], splitLocation, splitLocation +1)
+  allmetadata[i, "day"] <- cell_donor_day[2]
+  
+  x$sampleID <-  allmetadata[i, "sampleID"]
+  
+  alldata[[i]] <- x
+}
+```
+
+2) Reshape each array so that is is three arrays of  profileLength x nAngles (one array for each channel).
+
+```{r}
+
+reshapeProfiles <- function(profileLong, nAngles, profileLength){
+  profileMatrix <- matrix(profileLong, nrow = profileLength, ncol = nAngles)
+}
+
+nAngles <- 20
+profileLength <- 1000
+
+alldataMatrices <- lapply(alldata, function(x) {
+  ch1 <- reshapeProfiles(x[,1], nAngles, profileLength)
+  ch2 <- reshapeProfiles(x[,2], nAngles, profileLength)
+  ch3 <- reshapeProfiles(x[,3], nAngles, profileLength)
+  
+  start=rep(0, nAngles)
+  end=rep(profileLength, nAngles)
+
+  ch1truncated <- matrix(data=NA,ncol=nAngles,nrow=profileLength)
+  ch2truncated <- matrix(data=NA,ncol=nAngles,nrow=profileLength)
+  ch3truncated <- matrix(data=NA,ncol=nAngles,nrow=profileLength)
+  
+  #for every profile, truncate it so we only have the signal of interest (the data between the zeros)
+  #this processing relies on the assumption that all 3 channels have been masked. If not, you will #    #need to perform some sort of signal processing here to select only the data of interest 
+  for (i in 1:nAngles){
+    if(sum(ch2[,i])>0){
+      start[i] = min(which(ch2[, i] > 0))
+
+      tmp <-start[i]
+      tmpProfile <- ch2[tmp:profileLength, i]
+      if(min(tmpProfile)==0 ){ #if the profile truncates before profileLength
+      end[i] = min( which( tmpProfile == 0 ) ) + tmp
+      }
+      
+      ch1truncated[1:(end[i]-start[i]-1),i] <- ch1[start[i]:(end[i]-2), i]
+      ch2truncated[1:(end[i]-start[i]-1),i] <- ch2[start[i]:(end[i]-2), i]
+      ch3truncated[1:(end[i]-start[i]-1),i] <- ch3[start[i]:(end[i]-2), i]
+    }
+  }
+  
+
+  #I actually only care about the data from channel 2, so I'm only going to 'export' that
+  list("sampleID" = x[1,4], "ch2trunc"=ch2truncated  )
+  
+  #If you wanted all of the channels:
+    #list("sampleID" = x[1,4], "startIndex"=start, "endIndex"=end, "ch1"=ch1, "ch2"=ch2, "ch3"=ch3,       #"ch1trunc"=ch1truncated , "ch2trunc"=ch2truncated, "ch3trunc"=ch3truncated  )
+  
+  })
+
+```
+
+
+Remove unneeded data from the workspace.
+```{r}
+
+rm(alldata, cell_donor_day, filecodes, i, metadata, splitLocation, splitPath, x)
+
+```
+
+3) Now we want to extract the truncated profiles and encode in long format data frame (to facilitate plotting).
+
+```{r}
+
+profileDF <- lapply(alldataMatrices, function(x){
+  
+  indices<-rep(c(1:profileLength), times = nAngles)
+  tmp1 <- rep(1:nAngles, each=profileLength)
+  tmp2 <- rep(x[[1]], times=nAngles*profileLength)
+  profileID <- paste(tmp2, tmp1, sep="-")
+  m <- cbind(indices, "sampleID"=x[[1]], profileID)
+  
+  ch2 <- c(x[["ch2trunc"]])
+  
+  m <- cbind(m, ch2)
+
+})
+
+a<-profileDF[[1]]
+
+profilesLong <- do.call(rbind, profileDF)
+
+rm(a, profileDF)
+```
+
+OK, now we want to merge the profile data with the experimental metadata originally encoded in the filenames:
+
+```{r}
+
+mergedData <- merge(x=profilesLong, y=allmetadata, by="sampleID")
+
+mergedDatabackup<-mergedData
+
+#mergedDatabackup -> mergedData #if you need to revert at some point
+
+mergedData$indices <- as.numeric(as.character(mergedData$indices))
+mergedData$ch2 <- as.numeric(as.character(mergedData$ch2))
+mergedData$profileID <- as.factor(mergedData$profileID)
+mergedData$sampleID <- as.factor(mergedData$sampleID)
+mergedData$experimentID <- as.factor(mergedData$experimentID)
+mergedData$stainID <- as.factor(mergedData$stainID)
+mergedData$day <- as.factor(mergedData$day)
+mergedData$cellType <- as.factor(mergedData$cellType)
+mergedData$donor <- as.factor(mergedData$donor)
+```
+
+
+Here's where it get's interesting! We can calculate cell mean profiles (the 20 profiles averaged over an individual cell), and experimental group mean profiles (averaged over all of the cells). 
+```{r}
+library(plyr)
+
+mergedDataNArm <- mergedData[!is.na(mergedData$ch2), ]
+
+cellMeanProfiles <- ddply(mergedDataNArm, .(sampleID, indices, cellType, donor, day, stainID, experimentID), summarize,
+                          cellMeanCh2=mean(ch2)
+                          )
+
+# s005 <- subset(cellMeanProfiles, stainID %in% c("S005"))
+# s006 <- subset(cellMeanProfiles, stainID %in% c("S006"))
+# s008 <- subset(cellMeanProfiles, stainID %in% c("S008"))
+# s009 <- subset(cellMeanProfiles, stainID %in% c("S009"))
+
+ggplot()+
+  geom_line(data=s005, aes(x=indices, y=cellMeanCh2, color=sampleID))
+
+stainMeanProfiles <- ddply(cellMeanProfiles, .(stainID, indices, cellType, donor, day, experimentID), 
+                           summarize,
+                           stainMeanCh2=mean(cellMeanCh2)
+                           )
+
+s005006 <- ddply( subset(stainMeanProfiles, stainID %in% c("S005","S006")),
+                  .(indices, experimentID, cellType, donor), summarize,
+                 stainMeanCh2=sum(stainMeanCh2),
+                 stainID=as.factor("S005006"),
+                 day=as.factor("combo 2 + 2-4") 
+                )
+
+
+s008009 <- ddply( subset(stainMeanProfiles, stainID %in% c("S008","S009")),
+                  .(indices, experimentID, cellType, donor), summarize,
+                 stainMeanCh2=sum(stainMeanCh2),
+                 stainID=as.factor("S008009"),
+                 day=as.factor("combo 7 + 7-9") 
+                )
+
+
+stainMeanProfilesCombined <- rbind(stainMeanProfiles, s005006, s008009)
+
+ggplot()+
+  geom_line(data=stainMeanProfilesCombined, aes(x=indices, y=stainMeanCh2, color=stainID))
+
+
+
+ggplot()+
+  geom_line(data=subset(stainMeanProfilesCombined, stainID %in% c("S005", "S007", "S008", "S010")), aes(x=indices, y=stainMeanCh2, color=day))
+
+
+ggplot()+
+geom_line(data=subset(stainMeanProfilesCombined, stainID %in% c("S005", "S007", "S006", "S005006")), aes(x=indices, y=stainMeanCh2, color=day))
+
+
+ggplot()+
+geom_line(data=subset(stainMeanProfilesCombined, stainID %in% c("S010", "S008", "S009", "S008009")), aes(x=indices, y=stainMeanCh2, color=day))
+```
+
+
